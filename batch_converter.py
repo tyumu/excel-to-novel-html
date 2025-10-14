@@ -94,6 +94,7 @@ def process_excel_file(excel_path, skip_ai=False):
                 
                 in_decision = False
                 current_options = []
+                choices_already_displayed = False  # 選択肢を一度表示したかどうか
                 
                 for row in range(1, sheet.max_row + 1):
                     col2 = sheet.cell(row=row, column=2).value
@@ -106,12 +107,18 @@ def process_excel_file(excel_path, skip_ai=False):
                     if col2 == '--Decision--':
                         in_decision = True
                         decision_count += 1
-                        all_text.append('\n【ドクターの選択肢】')
                         current_options = []
+                        choices_already_displayed = False  # リセット
                         continue
                     
                     if col2 == '--Decision End--':
                         in_decision = False
+                        # 全ての選択肢を最初の1回だけ表示
+                        if current_options and not choices_already_displayed:
+                            all_text.append('\n【ドクターの選択肢】')
+                            all_text.extend(current_options)
+                            all_text.append('')
+                            choices_already_displayed = True
                         continue
                     
                     if in_decision and col2 and col2.startswith('Option_'):
@@ -120,12 +127,21 @@ def process_excel_file(excel_path, skip_ai=False):
                         continue
                     
                     if col2 == '--Branch--':
-                        if current_options:
-                            all_text.extend(current_options)
-                            all_text.append('')
-                        
                         branch_info = col3.strip() if col3 else ''
                         all_text.append(f'\n【分岐: {branch_info}】')
+                        
+                        # >Options_X または >Options_X&Y&Z から番号を抽出
+                        import re
+                        # >Options_1&2&3 のような複数選択肢にも対応
+                        match = re.search(r'>Options_([0-9&]+)', branch_info)
+                        if match and current_options:
+                            option_nums_str = match.group(1)
+                            # &で分割して複数の番号を取得
+                            option_nums = [int(n) for n in option_nums_str.split('&')]
+                            # 各選択肢を表示
+                            for option_num in option_nums:
+                                if 0 < option_num <= len(current_options):
+                                    all_text.append(current_options[option_num - 1])
                         continue
                     
                     # 画像

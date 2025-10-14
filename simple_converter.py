@@ -72,6 +72,7 @@ def extract_all_dialogues(excel_file=None):
         in_decision = False
         in_branch = False
         current_options = []
+        choices_already_displayed = False  # 選択肢を一度表示したかどうか
         
         for row in range(1, sheet.max_row + 1):
             col2 = sheet.cell(row=row, column=2).value  # 話者
@@ -87,17 +88,19 @@ def extract_all_dialogues(excel_file=None):
                 if BRANCH_DISPLAY["show_options"] and BRANCH_DISPLAY["options_format"] == "separate_page":
                     all_text.append("\n【選択肢】")
                 current_options = []
+                choices_already_displayed = False  # リセット
                 continue
                 
             elif col2 == '--Decision End--':
                 in_decision = False
-                if current_options and BRANCH_MODE == "include_all":
-                    # 全ての選択肢をインラインで表示
+                if current_options and BRANCH_MODE == "include_all" and not choices_already_displayed:
+                    # 全ての選択肢をインラインで表示（最初の1回だけ）
                     if BRANCH_DISPLAY["show_options"] and BRANCH_DISPLAY["options_format"] == "inline":
                         all_text.append("\n【ドクターの選択肢】")
                         for i, opt in enumerate(current_options, 1):
                             all_text.append(f"  選択肢{i}: {opt}")
                         all_text.append("")
+                        choices_already_displayed = True
                 continue
                 
             elif col2 and col2.startswith('Option_'):
@@ -110,7 +113,21 @@ def extract_all_dialogues(excel_file=None):
                 # 分岐点
                 branch_info = col3.strip() if col3 else ""
                 if BRANCH_MODE == "include_all":
+                    # 分岐マーカーの後に選択肢番号を表示
                     all_text.append(f"\n【分岐: {branch_info}】")
+                    
+                    # >Options_X または >Options_X&Y&Z から番号を抽出
+                    import re as re_module
+                    # >Options_1&2&3 のような複数選択肢にも対応
+                    match = re_module.search(r'>Options_([0-9&]+)', branch_info)
+                    if match and current_options:
+                        option_nums_str = match.group(1)
+                        # &で分割して複数の番号を取得
+                        option_nums = [int(n) for n in option_nums_str.split('&')]
+                        # 各選択肢を表示
+                        for option_num in option_nums:
+                            if option_num <= len(current_options):
+                                all_text.append(f"  選択肢{option_num}: {current_options[option_num-1]}")
                 continue
             
             # 通常の処理
@@ -470,8 +487,9 @@ def _split_branch_section(content):
     
     # 全選択肢を収集（最初の選択肢セクションのみ）
     all_choices = []
-    branches = {}  # {branch_id: [...lines...]}
+    branches = {}  # {branch_id: {'choice': str, 'lines': [...]}}
     current_branch_id = None
+    current_branch_choice = None
     current_branch_lines = []
     found_first_branch = False  # 最初の分岐マーカーを見つけたかどうか
     
@@ -492,37 +510,51 @@ def _split_branch_section(content):
             found_first_branch = True
             
             # 前の分岐を保存
-            if current_branch_id is not None and current_branch_lines:
+            if current_branch_id is not None:
                 if current_branch_id not in branches:
-                    branches[current_branch_id] = []
-                branches[current_branch_id].extend(current_branch_lines)
+                    branches[current_branch_id] = {'choice': current_branch_choice, 'lines': []}
+                branches[current_branch_id]['lines'].extend(current_branch_lines)
             
             # 新しい分岐を開始
-            # 【分岐: >Options_1】から "Options_1" を抽出
+            # 【分岐: >Options_1】または 【分岐: >Options_1&2&3】から番号を抽出
             import re as re_module
-            match = re_module.search(r'>Options_(\d+)', line_stripped)
+            # 複数選択肢の場合（>Options_1&2&3）
+            match = re_module.search(r'>Options_([0-9&]+)', line_stripped)
             if match:
-                current_branch_id = int(match.group(1))
+                option_str = match.group(1)
+                if '&' in option_str:
+                    # 複数選択肢が同じ結果になる場合は、特別なIDを使用
+                    current_branch_id = f"combined_{option_str}"
+                else:
+                    # 単一選択肢
+                    current_branch_id = int(option_str)
+                current_branch_choice = None  # 次の行で設定される
                 current_branch_lines = []
             elif 'End of Options' in line_stripped:
                 # 【分岐: End of Options】の場合は特別扱い
                 current_branch_id = 'end'
+                current_branch_choice = None
                 current_branch_lines = []
             continue
         
-        # 通常の行（セリフなど）
-        # ただし、分岐内の選択肢（繰り返し）は無視
-        if line_stripped and current_branch_id is not None:
-            # 分岐内の選択肢はスキップ
-            if line_stripped.startswith('選択肢') or line_stripped.startswith('選択:'):
+        # 分岐内の処理
+        if current_branch_id is not None:
+            # 分岐直後の選択肢表記を保存（表示用としてchoiceに保存し、linesにも含める）
+            if (line_stripped.startswith('選択肢') or line_stripped.startswith('選択:')) and current_branch_choice is None:
+                current_branch_choice = line_stripped
+                # 選択肢もlinesに含める（表示するため）
+                current_branch_lines.append(line_stripped)
                 continue
-            current_branch_lines.append(line_stripped)
+            
+            # その他の行を保存
+            if line_stripped:
+                current_branch_lines.append(line_stripped)
     
     # 最後の分岐を保存
-    if current_branch_id is not None and current_branch_lines:
+    if current_branch_id is not None:
         if current_branch_id not in branches:
-            branches[current_branch_id] = []
-        branches[current_branch_id].extend(current_branch_lines)
+            branches[current_branch_id] = {'choice': current_branch_choice, 'lines': []}
+        branches[current_branch_id]['lines'].extend(current_branch_lines)
     
     # 全選択肢を表示するページを作成（最初に1回だけ）
     unique_choices = []
@@ -535,22 +567,29 @@ def _split_branch_section(content):
     if unique_choices:
         pages.append(_create_choices_page(unique_choices))
     
-    # 各選択肢番号ごとに「選択肢 + 回答」ページを作成
+    # 各分岐の処理
+    # 1. 単一選択肢（数値キー）: 選択肢 + 回答のページを作成
+    # 2. 複数選択肢（combined_キー）: 選択肢表示なしで回答のみ表示
     numeric_branches = {k: v for k, v in branches.items() if isinstance(k, int)}
+    combined_branches = {k: v for k, v in branches.items() if isinstance(k, str) and k.startswith('combined_')}
+    
+    # 単一選択肢の処理
     for i in sorted(numeric_branches.keys()):
-        # 該当する選択肢を探す
-        choice_text = None
-        for choice in unique_choices:
-            if choice.startswith(f'選択肢{i}:') or choice.startswith(f'選択{i}:'):
-                choice_text = choice
-                break
-        
+        branch_data = numeric_branches[i]
         # 選択肢 + 回答のページを作成
-        pages.append(_create_choice_with_response_page(choice_text, numeric_branches[i]))
+        pages.append(_create_choice_with_response_page(branch_data['choice'], branch_data['lines']))
+    
+    # 複数選択肢が同じ結果になる場合（combined）の処理
+    # 選択肢は既に全選択肢ページで表示済みなので、回答のみ表示
+    for branch_id in sorted(combined_branches.keys()):
+        branch_data = combined_branches[branch_id]
+        # branch_idから番号部分を抽出 (combined_1&2&3 -> 1&2&3)
+        option_nums = branch_id.replace('combined_', '')
+        pages.append(_create_combined_branch_page(branch_data['lines'], option_nums))
     
     # 'end' 分岐がある場合は、選択肢なしで表示
     if 'end' in branches and branches['end']:
-        pages.append(_create_end_branch_page(branches['end']))
+        pages.append(_create_end_branch_page(branches['end']['lines']))
     
     return pages
 
@@ -574,17 +613,17 @@ def _create_choice_with_response_page(choice_text, response_lines):
     """選択肢 + 回答を表示するページを生成"""
     formatted_lines = []
     
-    # 選択肢を追加
-    if choice_text:
-        formatted_lines.append(f'<span class="choice-text">{choice_text}</span>')
-    
-    # 回答を追加
+    # 回答を追加（選択肢もresponse_linesに含まれている）
     for line in response_lines:
         if not line:
             continue
         
+        # 選択肢行の処理
+        if line.startswith('選択肢') or line.startswith('選択:'):
+            formatted_lines.append(f'<span class="choice-text">{line}</span>')
+        
         # 話者名付きセリフ
-        if line.startswith('【') and '】' in line:
+        elif line.startswith('【') and '】' in line:
             speaker_end = line.find('】')
             speaker = line[:speaker_end + 1]
             dialogue = line[speaker_end + 1:]
@@ -592,10 +631,6 @@ def _create_choice_with_response_page(choice_text, response_lines):
             formatted = f'<span class="speaker">{speaker}</span><br>{dialogue}'
             formatted = re.sub(r'(\d{1,2})(?=[年月日時分秒cc])', r'<span class="tcy">\1</span>', formatted)
             formatted_lines.append(formatted)
-        
-        # 選択肢はスキップ（回答内に含まれている場合）
-        elif line.startswith('選択肢') or line.startswith('選択:'):
-            continue
         
         # その他のテキスト
         else:
@@ -615,20 +650,56 @@ def _create_end_branch_page(response_lines):
     """選択後の共通セリフを表示するページを生成（選択肢なし）"""
     formatted_lines = []
     
+    # マーカーを最初に表示
+    formatted_lines.append('<span class="branch-marker">【分岐: End of Options】</span>')
+    
     for line in response_lines:
-        if not line:
-            continue
-        
-        # 話者名付きセリフ
+        # 話者名の処理
         if line.startswith('【') and '】' in line:
-            speaker_end = line.find('】')
-            speaker = line[:speaker_end + 1]
-            dialogue = line[speaker_end + 1:]
-            
+            # 話者名とセリフを分割
+            bracket_end = line.find('】')
+            speaker = line[1:bracket_end]
+            dialogue = line[bracket_end+1:]
             formatted = f'<span class="speaker">{speaker}</span><br>{dialogue}'
             formatted = re.sub(r'(\d{1,2})(?=[年月日時分秒cc])', r'<span class="tcy">\1</span>', formatted)
             formatted_lines.append(formatted)
-        
+        # 選択肢はスキップ
+        elif line.startswith('選択肢') or line.startswith('選択:'):
+            continue
+        # その他のテキスト
+        else:
+            formatted = re.sub(r'(\d{1,2})(?=[年月日時分秒cc])', r'<span class="tcy">\1</span>', line)
+            formatted_lines.append(formatted)
+    
+    content_html = '<br>\n            '.join(formatted_lines)
+    
+    return f'''    <div class="page branch text">
+        <p>
+            {content_html}
+        </p>
+    </div>'''
+
+
+def _create_combined_branch_page(response_lines, option_nums):
+    """複数選択肢が同じ結果になる場合のページを生成（選択肢表示なし、回答のみ）"""
+    formatted_lines = []
+    
+    # マーカーを最初に表示
+    formatted_lines.append(f'<span class="branch-marker">【分岐: >Options_{option_nums}】</span>')
+    
+    for line in response_lines:
+        # 話者名の処理
+        if line.startswith('【') and '】' in line:
+            # 話者名とセリフを分割
+            bracket_end = line.find('】')
+            speaker = line[1:bracket_end]
+            dialogue = line[bracket_end+1:]
+            formatted = f'<span class="speaker">{speaker}</span><br>{dialogue}'
+            formatted = re.sub(r'(\d{1,2})(?=[年月日時分秒cc])', r'<span class="tcy">\1</span>', formatted)
+            formatted_lines.append(formatted)
+        # 選択肢はスキップ（既に全選択肢ページで表示済み）
+        elif line.startswith('選択肢') or line.startswith('選択:'):
+            continue
         # その他のテキスト
         else:
             formatted = re.sub(r'(\d{1,2})(?=[年月日時分秒cc])', r'<span class="tcy">\1</span>', line)
